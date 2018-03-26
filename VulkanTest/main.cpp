@@ -24,8 +24,8 @@ int main()
     };
 
     const uint32_t kCommandBufferCount = 1;
-    const uint32_t kWindowWidth = 1024;
-    const uint32_t kWindowHeight = 768;
+    const uint32_t kWindowWidth = 640;
+    const uint32_t kWindowHeight = 480;
     const char* kWindowTitle = "VulkanTest";
 
     HINSTANCE moduleInstance;
