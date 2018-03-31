@@ -10,10 +10,27 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+#include "gunk/math.h"
+
 //#define LOG OutputDebugStringA
 #define LOG printf
 
 static LRESULT CALLBACK WindowProcess(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
+static int32_t FindMemoryProperties(
+    VkPhysicalDeviceMemoryProperties& physicalMemoryProperties, 
+    uint32_t memoryTypeBits, 
+    VkMemoryPropertyFlags properties)
+{
+    int32_t memoryCount = (int32_t)physicalMemoryProperties.memoryTypeCount;
+    for (int32_t index = 0; index < memoryCount; ++index)
+    {
+        if ((memoryTypeBits & (1 << index)) && (physicalMemoryProperties.memoryTypes[index].propertyFlags & properties) == properties)
+        {
+            return index;
+        }
+    }
+    return -1;
+}
 
 int main()
 {
@@ -36,8 +53,18 @@ int main()
     VkCommandBuffer vulkanCommandBuffers[1] = { NULL };
     VkSurfaceKHR vulkanSurface = NULL;
     VkSwapchainKHR vulkanSwapchain = NULL;
+    VkImage vulkanDepthBufferImage = NULL;
+    VkImageView vulkanDepthBufferImageView = NULL;
     VkPhysicalDevice* pPhysicalDevices = NULL;
     VkQueueFamilyProperties* pQueueFamilyProperties = NULL;
+    VkPhysicalDeviceMemoryProperties physicalDeviceMemoryProperties = { 0 };
+    VkDeviceMemory vulkanDepthBufferImageMemory = { 0 };
+    VkBuffer vulkanUniformBuffer = NULL;
+    VkDeviceMemory vulkanUniformBufferMemory = { 0 };
+    VkDescriptorSetLayout vulkanDescriptorSetLayout = {};
+    VkPipelineLayout vulkanPipelineLayout = {};
+    VkDescriptorSet vulkanDescriptorSet = {};
+    VkDescriptorPool vulkanDescriptorPool = {};
     SwapchainBuffers* pSwapchainBuffers = NULL;
 
     uint32_t swapchainBufferCount = 0;
@@ -236,6 +263,9 @@ int main()
             LOG("Failed: Create Logical Device\n");
             goto ExitFreeQueueFamilyProperties;
         }
+
+        //Get Physical Device Memory Properties
+        vkGetPhysicalDeviceMemoryProperties(pPhysicalDevices[0], &physicalDeviceMemoryProperties);
     }
     #pragma endregion
     LOG("Passed: Create Logical Device\n");
@@ -382,7 +412,7 @@ int main()
         swapchainCreateInfo.imageColorSpace = VK_COLORSPACE_SRGB_NONLINEAR_KHR;
         swapchainCreateInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 
-        if (queueGraphicsFamilyIndex != queuePresentFamilyIndex)
+        if (queueGraphicsFamilyIndex == queuePresentFamilyIndex)
         {
             swapchainCreateInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
             swapchainCreateInfo.queueFamilyIndexCount = 0;
@@ -456,6 +486,265 @@ int main()
     #pragma endregion
     LOG("Passed: Create Swapchain\n");
 
+    #pragma region Create Depth Buffer
+    {
+        // Create Depth buffer image object
+        VkImageCreateInfo imageCreateInfo = {};
+        imageCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        imageCreateInfo.pNext = NULL;
+        imageCreateInfo.imageType = VK_IMAGE_TYPE_2D;
+        imageCreateInfo.format = VK_FORMAT_D16_UNORM;
+        imageCreateInfo.extent.width = kWindowWidth;
+        imageCreateInfo.extent.height = kWindowHeight;
+        imageCreateInfo.extent.depth = 1;
+        imageCreateInfo.mipLevels = 1;
+        imageCreateInfo.arrayLayers = 1;
+        imageCreateInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        imageCreateInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        imageCreateInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        imageCreateInfo.queueFamilyIndexCount = 0;
+        imageCreateInfo.pQueueFamilyIndices = NULL;
+        imageCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        imageCreateInfo.flags = 0;
+
+        VkResult result = vkCreateImage(vulkanDevice, &imageCreateInfo, NULL, &vulkanDepthBufferImage);
+        if (result != VK_SUCCESS)
+        {
+            LOG("Failed: Create Depth Buffer\n");
+            goto ExitFreeSwapchainBuffers;
+        }
+
+        // Allocate memory for depth buffer
+        VkMemoryRequirements imageAllocationRequirements = {};
+        vkGetImageMemoryRequirements(vulkanDevice, vulkanDepthBufferImage, &imageAllocationRequirements);
+        
+        VkMemoryAllocateInfo memAllocInfo = {};
+        memAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        memAllocInfo.pNext = NULL;
+        memAllocInfo.allocationSize = imageAllocationRequirements.size;
+        memAllocInfo.memoryTypeIndex = FindMemoryProperties(physicalDeviceMemoryProperties, imageAllocationRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        
+        result = vkAllocateMemory(vulkanDevice, &memAllocInfo, NULL, &vulkanDepthBufferImageMemory);
+
+        if (result != VK_SUCCESS)
+        {
+            LOG("Failed: Create Depth Buffer\n");
+            goto ExitDestroyVulkanDepthBufferImage;
+        }
+
+        result = vkBindImageMemory(vulkanDevice, vulkanDepthBufferImage, vulkanDepthBufferImageMemory, 0);
+
+        if (result != VK_SUCCESS)
+        {
+            LOG("Failed: Create Depth Buffer\n");
+            goto ExitDestroyVulkanDepthBufferImage;
+        }
+
+        VkImageViewCreateInfo imageViewCreateInfo = {};
+        imageViewCreateInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        imageViewCreateInfo.pNext = NULL;
+        imageViewCreateInfo.image = vulkanDepthBufferImage;
+        imageViewCreateInfo.format = VK_FORMAT_D16_UNORM;
+        imageViewCreateInfo.components.r = VK_COMPONENT_SWIZZLE_R;
+        imageViewCreateInfo.components.g = VK_COMPONENT_SWIZZLE_G;
+        imageViewCreateInfo.components.b = VK_COMPONENT_SWIZZLE_B;
+        imageViewCreateInfo.components.a = VK_COMPONENT_SWIZZLE_A;
+        imageViewCreateInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        imageViewCreateInfo.subresourceRange.baseMipLevel = 0;
+        imageViewCreateInfo.subresourceRange.levelCount = 1;
+        imageViewCreateInfo.subresourceRange.baseArrayLayer = 0;
+        imageViewCreateInfo.subresourceRange.layerCount = 1;
+        imageViewCreateInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        imageViewCreateInfo.flags = 0;
+        result = vkCreateImageView(vulkanDevice, &imageViewCreateInfo, NULL, &vulkanDepthBufferImageView);
+
+        if (result != VK_SUCCESS)
+        {
+            LOG("Failed: Create Depth Buffer\n");
+            goto ExitFreeDepthImageMemory;
+        }
+    }
+    #pragma endregion
+    LOG("Passed: Create Depth Buffer\n");
+
+    #pragma region Create Uniform Buffer
+    {
+        using namespace gunk;
+
+        Matrix4 model;
+        Matrix4 view;
+        Matrix4 projection;
+        Matrix4 clip;
+        Matrix4 mvp;
+        Vector3 up = { 0.0f, -1.0f, 0.0f };
+        Vector3 center = { 0.0f, 0.0f, 0.0f };
+        Vector3 eye = { 0.0f, 3.0f, 10.0f };
+
+        math::Identity(&model);
+        math::LookAt(&view, &eye, &center, &up);
+        math::Perspective(&projection, DegToRad(45.0f), 640.0f / 480.0f, 0.1f, 100.0f);
+        clip.Set(
+            1.0f, 0.0f, 0.0f, 0.0f,
+            0.0f, -1.0f, 0.0f, 0.0f,
+            0.0f, 0.0f, 0.5f, 0.0f,
+            0.0f, 0.0f, 0.5f, 1.0f
+        );
+        math::Mul(&mvp, &clip, &projection);
+        math::Mul(&mvp, &mvp, &view);
+        math::Mul(&mvp, &mvp, &model);
+
+        VkBufferCreateInfo bufferCreateInfo = {};
+        bufferCreateInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferCreateInfo.pNext = NULL;
+        bufferCreateInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+        bufferCreateInfo.size = sizeof(Matrix4);
+        bufferCreateInfo.queueFamilyIndexCount = 0;
+        bufferCreateInfo.pQueueFamilyIndices = NULL;
+        bufferCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        bufferCreateInfo.flags = 0;
+
+        VkResult result = vkCreateBuffer(vulkanDevice, &bufferCreateInfo, NULL, &vulkanUniformBuffer);
+        if (result != VK_SUCCESS)
+        {
+            LOG("Failed: Create Uniform Buffer\n");
+            goto ExitDestroyVulkanDepthBufferImageView;
+        }
+
+        VkMemoryRequirements bufferMemoryRequirement = {};
+        vkGetBufferMemoryRequirements(vulkanDevice, vulkanUniformBuffer, &bufferMemoryRequirement);
+
+        VkMemoryAllocateInfo memAllocInfo = {};
+        memAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        memAllocInfo.pNext = NULL;
+        memAllocInfo.allocationSize = bufferMemoryRequirement.size;
+        memAllocInfo.memoryTypeIndex = FindMemoryProperties(
+            physicalDeviceMemoryProperties, 
+            bufferMemoryRequirement.memoryTypeBits, 
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+        );
+
+        result = vkAllocateMemory(vulkanDevice, &memAllocInfo, NULL, &vulkanUniformBufferMemory);
+        if (result != VK_SUCCESS)
+        {
+            LOG("Failed: Create Uniform Buffer\n");
+            goto ExitDestroyVulkanUniformBuffer;
+        }
+
+        void* pMappedUniformBuffer = NULL;
+        result = vkMapMemory(vulkanDevice, vulkanUniformBufferMemory, 0, bufferMemoryRequirement.size, 0, &pMappedUniformBuffer);
+        if (result != VK_SUCCESS)
+        {
+            LOG("Failed: Create Uniform Buffer\n");
+            goto ExitFreeUniformBufferMemory;
+        }
+        memcpy(pMappedUniformBuffer, &mvp, sizeof(mvp));
+        vkUnmapMemory(vulkanDevice, vulkanUniformBufferMemory);
+
+        result = vkBindBufferMemory(vulkanDevice, vulkanUniformBuffer, vulkanUniformBufferMemory, 0);
+        if (result != VK_SUCCESS)
+        {
+            LOG("Failed: Create Uniform Buffer\n");
+            goto ExitFreeUniformBufferMemory;
+        }
+    }
+    #pragma endregion
+    LOG("Passed: Create Uniform Buffer\n");
+
+    #pragma region Create Pipeline Layout
+    {
+        VkDescriptorSetLayoutBinding layoutBinding = {};
+        layoutBinding.binding = 0;
+        layoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        layoutBinding.descriptorCount = 1;
+        layoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+        VkDescriptorSetLayoutCreateInfo descriptorSetLayoutCreateInfo = {};
+        descriptorSetLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        descriptorSetLayoutCreateInfo.pNext = NULL;
+        descriptorSetLayoutCreateInfo.bindingCount = 1;
+        descriptorSetLayoutCreateInfo.pBindings = &layoutBinding;
+        descriptorSetLayoutCreateInfo.flags = 0;
+
+        VkResult result = vkCreateDescriptorSetLayout(vulkanDevice, &descriptorSetLayoutCreateInfo, NULL, &vulkanDescriptorSetLayout);
+        if (result != VK_SUCCESS)
+        {
+            LOG("Failed: Create Pipeline Layout\n");
+            goto ExitFreeUniformBufferMemory;
+        }
+
+        VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo = {};
+        pipelineLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pipelineLayoutCreateInfo.pNext = NULL;
+        pipelineLayoutCreateInfo.pushConstantRangeCount = 0;
+        pipelineLayoutCreateInfo.pPushConstantRanges = NULL;
+        pipelineLayoutCreateInfo.setLayoutCount = 1;
+        pipelineLayoutCreateInfo.pSetLayouts = &vulkanDescriptorSetLayout;
+
+        result = vkCreatePipelineLayout(vulkanDevice, &pipelineLayoutCreateInfo, NULL, &vulkanPipelineLayout);
+        if (result != VK_SUCCESS)
+        {
+            LOG("Failed: Create Pipeline Layout\n");
+            goto ExitDestroyDescriptorSetLayout;
+        }
+    }
+    #pragma endregion
+    LOG("Passed: Create Pipeline Layout\n");
+
+    #pragma region Create Descriptor Set
+    {
+        VkDescriptorPoolSize typeCount = {};
+        typeCount.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        typeCount.descriptorCount = 1;
+
+        VkDescriptorPoolCreateInfo descriptorPoolCreateInfo = {};
+        descriptorPoolCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        descriptorPoolCreateInfo.pNext = NULL;
+        descriptorPoolCreateInfo.maxSets = 1;
+        descriptorPoolCreateInfo.poolSizeCount = 1;
+        descriptorPoolCreateInfo.pPoolSizes = &typeCount;
+        descriptorPoolCreateInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+
+        VkResult result = vkCreateDescriptorPool(vulkanDevice, &descriptorPoolCreateInfo, NULL, &vulkanDescriptorPool);
+        if (result != VK_SUCCESS)
+        {
+            LOG("Failed: Create Descriptor Set\n");
+            goto ExitDestroyDestroyPipelineLayout;
+        }
+
+        VkDescriptorSetAllocateInfo allocateInfo = {};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocateInfo.pNext = NULL;
+        allocateInfo.descriptorPool = vulkanDescriptorPool;
+        allocateInfo.descriptorSetCount = 1;
+        allocateInfo.pSetLayouts = &vulkanDescriptorSetLayout;
+
+        result = vkAllocateDescriptorSets(vulkanDevice, &allocateInfo, &vulkanDescriptorSet);
+        if (result != VK_SUCCESS)
+        {
+            LOG("Failed: Create Descriptor Set\n");
+            goto ExitDestroyDescriptorPool;
+        }
+
+        VkDescriptorBufferInfo bufferInfo = {};
+        bufferInfo.buffer = vulkanUniformBuffer;
+        bufferInfo.offset = 0;
+        bufferInfo.range = sizeof(gunk::Matrix4);
+
+        VkWriteDescriptorSet write = {};
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.pNext = NULL;
+        write.dstSet = vulkanDescriptorSet;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        write.pBufferInfo = &bufferInfo;
+        write.dstArrayElement = 0;
+        write.dstBinding = 0;
+
+        vkUpdateDescriptorSets(vulkanDevice, 1, &write, 0, NULL);
+    }
+    #pragma endregion
+    LOG("Passed: Create Descriptor Set\n");
+
     #pragma region Create Command Pool
     {
         VkCommandPoolCreateInfo commandPoolCreateInfo = {};
@@ -469,7 +758,7 @@ int main()
         if (result != VK_SUCCESS)
         {
             LOG("Failed: Create Command Pool");
-            goto ExitFreeSwapchainBuffers;
+            goto ExitFreeDescriptorSet;
         }
     }
     #pragma endregion
@@ -502,6 +791,34 @@ ExitDestroyVulkanCommandBuffers:
 
 ExitDestroyVulkanCommandPool:
     vkDestroyCommandPool(vulkanDevice, vulkanCommandPool, NULL);
+
+    //----
+ExitFreeDescriptorSet:
+    vkFreeDescriptorSets(vulkanDevice, vulkanDescriptorPool, 1, &vulkanDescriptorSet);
+
+ExitDestroyDescriptorPool:
+    vkDestroyDescriptorPool(vulkanDevice, vulkanDescriptorPool, NULL);
+
+ExitDestroyDestroyPipelineLayout:
+    vkDestroyPipelineLayout(vulkanDevice, vulkanPipelineLayout, NULL);
+
+ExitDestroyDescriptorSetLayout:
+    vkDestroyDescriptorSetLayout(vulkanDevice, vulkanDescriptorSetLayout, NULL);
+
+ExitFreeUniformBufferMemory:
+    vkFreeMemory(vulkanDevice, vulkanUniformBufferMemory, NULL);
+
+ExitDestroyVulkanUniformBuffer:
+    vkDestroyBuffer(vulkanDevice, vulkanUniformBuffer, NULL);
+
+ExitDestroyVulkanDepthBufferImageView:
+    vkDestroyImageView(vulkanDevice, vulkanDepthBufferImageView, NULL);
+
+ExitFreeDepthImageMemory:
+    vkFreeMemory(vulkanDevice, vulkanDepthBufferImageMemory, NULL);
+
+ExitDestroyVulkanDepthBufferImage:
+    vkDestroyImage(vulkanDevice, vulkanDepthBufferImage, NULL);
 
 ExitFreeSwapchainBuffers:
     for (uint32_t index = 0; index < swapchainBufferCount; ++index)
